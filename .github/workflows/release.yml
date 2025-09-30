@@ -1,0 +1,238 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Set output name
+        id: vars
+        run: |
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            echo "binary_name=time-display-${{ matrix.goos }}-${{ matrix.goarch }}.exe" >> $GITHUB_OUTPUT
+          else
+            echo "binary_name=time-display-${{ matrix.goos }}-${{ matrix.goarch }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-s -w" -o ${{ steps.vars.outputs.binary_name }} main.go
+
+      - name: Compress binary (Linux/macOS)
+        if: matrix.goos != 'windows'
+        run: |
+          tar -czf ${{ steps.vars.outputs.binary_name }}.tar.gz ${{ steps.vars.outputs.binary_name }}
+          
+      - name: Compress binary (Windows)
+        if: matrix.goos == 'windows'
+        run: |
+          zip ${{ steps.vars.outputs.binary_name }}.zip ${{ steps.vars.outputs.binary_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.vars.outputs.binary_name }}
+          path: |
+            ${{ steps.vars.outputs.binary_name }}.tar.gz
+            ${{ steps.vars.outputs.binary_name }}.zip
+          if-no-files-found: ignore
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Create sample config files
+        run: |
+          cd release
+          
+          # 创建示例 config.json
+          cat > config.json << 'EOF'
+          {
+            "datesFile": "dates.json",
+            "sentencesFile": "sentences.json",
+            "showDateAmount": 7,
+            "dateFormat": "2006/01/02",
+            "location": {
+              "latitude": 39.9042,
+              "longitude": 116.4074,
+              "timezone": 8
+            },
+            "showSunTimes": true,
+            "showDailySentence": true,
+            "cacheDir": "cache",
+            "sentenceUpdateMode": "count",
+            "sentenceUpdateInterval": 5
+          }
+          EOF
+          
+          # 创建示例 dates.json
+          cat > dates.json << 'EOF'
+          {
+            "events": [
+              {
+                "name": "春节",
+                "type": "festival",
+                "month": 1,
+                "day": 1,
+                "repeatYearly": true,
+                "alwaysShow": true,
+                "isLunar": true
+              },
+              {
+                "name": "国庆节",
+                "type": "festival",
+                "month": 10,
+                "day": 1,
+                "repeatYearly": true,
+                "alwaysShow": false,
+                "isLunar": false
+              }
+            ]
+          }
+          EOF
+          
+          # 创建示例 sentences.json
+          cat > sentences.json << 'EOF'
+          {
+            "sentences": [
+              "今天也要加油哦！",
+              "生活明朗，万物可爱。",
+              "星光不问赶路人，时光不负有心人。",
+              "愿你走出半生，归来仍是少年。",
+              "保持热爱，奔赴山海。"
+            ]
+          }
+          EOF
+          
+          # 打包配置文件
+          zip config-files.zip config.json dates.json sentences.json
+          tar -czf config-files.tar.gz config.json dates.json sentences.json
+          rm config.json dates.json sentences.json
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          cat > release_notes.md << 'EOF'
+          ## 下载说明
+          
+          请根据您的操作系统和架构选择对应的文件：
+          
+          ### Windows
+          - `time-display-windows-amd64.exe.zip` - Windows 64位
+          
+          ### Linux
+          - `time-display-linux-amd64.tar.gz` - Linux 64位 (x86_64)
+          - `time-display-linux-arm64.tar.gz` - Linux ARM64
+          
+          ### macOS
+          - `time-display-darwin-amd64.tar.gz` - macOS Intel 芯片
+          - `time-display-darwin-arm64.tar.gz` - macOS Apple Silicon (M1/M2/M3)
+          
+          ### 配置文件
+          - `config-files.zip` / `config-files.tar.gz` - 示例配置文件
+          
+          ## 使用方法
+          
+          1. 下载对应平台的可执行文件
+          2. 下载配置文件包并解压
+          3. 将可执行文件和配置文件放在同一目录
+          4. 运行程序：
+             - Windows: `time-display-windows-amd64.exe`
+             - Linux/macOS: `./time-display-linux-amd64` (需要先添加执行权限: `chmod +x time-display-*`)
+          
+          ## 快速开始
+          
+          ```bash
+          # Linux/macOS
+          tar -xzf time-display-linux-amd64.tar.gz
+          tar -xzf config-files.tar.gz
+          chmod +x time-display-linux-amd64
+          ./time-display-linux-amd64
+          
+          # Windows (PowerShell)
+          Expand-Archive time-display-windows-amd64.exe.zip
+          Expand-Archive config-files.zip
+          .\time-display-windows-amd64.exe
+          ```
+          
+          详细文档请查看 [README.md](https://github.com/${{ github.repository }}/blob/main/README.md)
+          EOF
+          
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          cat release_notes.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release/*
+          body: ${{ steps.release_notes.outputs.notes }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Release (Manual)
+        uses: softprops/action-gh-release@v1
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: manual-${{ github.sha }}
+          name: Manual Build ${{ github.sha }}
+          files: release/*
+          body: ${{ steps.release_notes.outputs.notes }}
+          draft: true
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
