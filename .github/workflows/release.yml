@@ -11,14 +11,20 @@ permissions:
 
 jobs:
   build:
-    name: Build and Release
+    name: Build
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        goos: [linux, windows, darwin]
-        goarch: [amd64, arm64]
-        exclude:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
           - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
             goarch: arm64
     
     steps:
@@ -33,41 +39,34 @@ jobs:
       - name: Get dependencies
         run: go mod download
 
-      - name: Set output name
-        id: vars
-        run: |
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            echo "binary_name=time-display-${{ matrix.goos }}-${{ matrix.goarch }}.exe" >> $GITHUB_OUTPUT
-          else
-            echo "binary_name=time-display-${{ matrix.goos }}-${{ matrix.goarch }}" >> $GITHUB_OUTPUT
-          fi
-
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         run: |
-          go build -ldflags="-s -w" -o ${{ steps.vars.outputs.binary_name }} main.go
-
-      - name: Compress binary (Linux/macOS)
-        if: matrix.goos != 'windows'
-        run: |
-          tar -czf ${{ steps.vars.outputs.binary_name }}.tar.gz ${{ steps.vars.outputs.binary_name }}
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY_NAME="time-display-${{ matrix.goos }}-${{ matrix.goarch }}.exe"
+          else
+            BINARY_NAME="time-display-${{ matrix.goos }}-${{ matrix.goarch }}"
+          fi
+          go build -ldflags="-s -w" -o "$BINARY_NAME" main.go
           
-      - name: Compress binary (Windows)
-        if: matrix.goos == 'windows'
-        run: |
-          zip ${{ steps.vars.outputs.binary_name }}.zip ${{ steps.vars.outputs.binary_name }}
+          # 压缩文件
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip "${BINARY_NAME}.zip" "$BINARY_NAME"
+            echo "ASSET=${BINARY_NAME}.zip" >> $GITHUB_ENV
+          else
+            tar -czf "${BINARY_NAME}.tar.gz" "$BINARY_NAME"
+            echo "ASSET=${BINARY_NAME}.tar.gz" >> $GITHUB_ENV
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.vars.outputs.binary_name }}
-          path: |
-            ${{ steps.vars.outputs.binary_name }}.tar.gz
-            ${{ steps.vars.outputs.binary_name }}.zip
-          if-no-files-found: ignore
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ env.ASSET }}
+          retention-days: 1
 
   release:
     name: Create Release
@@ -83,19 +82,18 @@ jobs:
         with:
           path: artifacts
 
-      - name: Display structure of downloaded files
-        run: ls -R artifacts
-
       - name: Prepare release files
         run: |
           mkdir -p release
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release/ \;
+          
+          # 移动所有压缩包到 release 目录
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec mv {} release/ \;
+          
+          echo "Release files:"
           ls -lh release/
 
       - name: Create sample config files
         run: |
-          cd release
-          
           # 创建示例 config.json
           cat > config.json << 'EOF'
           {
@@ -156,15 +154,20 @@ jobs:
           EOF
           
           # 打包配置文件
-          zip config-files.zip config.json dates.json sentences.json
-          tar -czf config-files.tar.gz config.json dates.json sentences.json
-          rm config.json dates.json sentences.json
+          zip release/config-files.zip config.json dates.json sentences.json
+          tar -czf release/config-files.tar.gz config.json dates.json sentences.json
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Generate release notes
         id: release_notes
         run: |
           cat > release_notes.md << 'EOF'
-          ## 下载说明
+          ## 📦 下载说明
           
           请根据您的操作系统和架构选择对应的文件：
           
@@ -182,39 +185,86 @@ jobs:
           ### 配置文件
           - `config-files.zip` / `config-files.tar.gz` - 示例配置文件
           
-          ## 使用方法
+          ### 校验文件
+          - `SHA256SUMS` - 所有文件的 SHA256 校验和
           
-          1. 下载对应平台的可执行文件
-          2. 下载配置文件包并解压
-          3. 将可执行文件和配置文件放在同一目录
-          4. 运行程序：
-             - Windows: `time-display-windows-amd64.exe`
-             - Linux/macOS: `./time-display-linux-amd64` (需要先添加执行权限: `chmod +x time-display-*`)
+          ---
           
-          ## 快速开始
+          ## 🚀 快速开始
           
+          ### Linux/macOS
           ```bash
-          # Linux/macOS
+          # 下载并解压
           tar -xzf time-display-linux-amd64.tar.gz
           tar -xzf config-files.tar.gz
-          chmod +x time-display-linux-amd64
-          ./time-display-linux-amd64
           
-          # Windows (PowerShell)
+          # 添加执行权限
+          chmod +x time-display-linux-amd64
+          
+          # 运行
+          ./time-display-linux-amd64
+          ```
+          
+          ### Windows (PowerShell)
+          ```powershell
+          # 解压
           Expand-Archive time-display-windows-amd64.exe.zip
           Expand-Archive config-files.zip
+          
+          # 运行
           .\time-display-windows-amd64.exe
           ```
           
-          详细文档请查看 [README.md](https://github.com/${{ github.repository }}/blob/main/README.md)
+          ---
+          
+          ## 📖 使用说明
+          
+          ### 查看帮助
+          ```bash
+          ./time-display -h
+          ```
+          
+          ### 添加事件
+          ```bash
+          # 交互式添加
+          ./time-display -add-event
+          
+          # 指定事件名称
+          ./time-display -add-event 春节
+          ```
+          
+          ### 添加文案
+          ```bash
+          ./time-display -add-sentence "你的文案内容"
+          ```
+          
+          ### 刷新文案
+          ```bash
+          ./time-display -refresh-sentence
+          ```
+          
+          ---
+          
+          ## 📝 详细文档
+          
+          完整使用说明请查看 [README.md](https://github.com/${{ github.repository }}/blob/main/README.md)
+          
+          ## 🔐 文件校验
+          
+          下载后建议验证文件完整性：
+          ```bash
+          sha256sum -c SHA256SUMS
+          ```
           EOF
           
-          echo "notes<<EOF" >> $GITHUB_OUTPUT
-          cat release_notes.md >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          {
+            echo "notes<<RELEASE_NOTES_EOF"
+            cat release_notes.md
+            echo "RELEASE_NOTES_EOF"
+          } >> $GITHUB_OUTPUT
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: release/*
@@ -225,11 +275,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create Release (Manual)
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: github.event_name == 'workflow_dispatch'
         with:
-          tag_name: manual-${{ github.sha }}
-          name: Manual Build ${{ github.sha }}
+          tag_name: manual-${{ github.run_number }}
+          name: Manual Build #${{ github.run_number }}
           files: release/*
           body: ${{ steps.release_notes.outputs.notes }}
           draft: true
